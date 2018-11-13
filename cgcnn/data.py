@@ -13,70 +13,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data.sampler import SubsetRandomSampler
 from pymatgen.core.structure import Structure
-
-
-def get_train_val_test_loader(dataset, collate_fn=default_collate,
-                              batch_size=64, train_size=None,
-                              val_size=1000, test_size=1000, return_test=False,
-                              num_workers=1, pin_memory=False):
-    """
-    Utility function for dividing a dataset to train, val, test datasets.
-
-    !!! The dataset needs to be shuffled before using the function !!!
-
-    Parameters
-    ----------
-    dataset: torch.utils.data.Dataset
-      The full dataset to be divided.
-    batch_size: int
-    train_size: int
-    val_size: int
-    test_size: int
-    return_test: bool
-      Whether to return the test dataset loader. If False, the last test_size
-      data will be hidden.
-    num_workers: int
-    pin_memory: bool
-
-    Returns
-    -------
-    train_loader: torch.utils.data.DataLoader
-      DataLoader that random samples the training data.
-    val_loader: torch.utils.data.DataLoader
-      DataLoader that random samples the validation data.
-    (test_loader): torch.utils.data.DataLoader
-      DataLoader that random samples the test data, returns if
-        return_test=True.
-    """
-    total_size = len(dataset)
-    if train_size is None:
-        assert val_size + test_size < total_size
-        print('[Warning] train_size is None, using all training data.')
-    else:
-        assert train_size + val_size + test_size <= total_size
-    indices = list(range(total_size))
-    train_sampler = SubsetRandomSampler(indices[:train_size])
-    val_sampler = SubsetRandomSampler(
-                    indices[-(val_size+test_size):-test_size])
-    if return_test:
-        test_sampler = SubsetRandomSampler(indices[-test_size:])
-    train_loader = DataLoader(dataset, batch_size=batch_size,
-                              sampler=train_sampler,
-                              num_workers=num_workers,
-                              collate_fn=collate_fn, pin_memory=pin_memory)
-    val_loader = DataLoader(dataset, batch_size=batch_size,
-                            sampler=val_sampler,
-                            num_workers=num_workers,
-                            collate_fn=collate_fn, pin_memory=pin_memory)
-    if return_test:
-        test_loader = DataLoader(dataset, batch_size=batch_size,
-                                 sampler=test_sampler,
-                                 num_workers=num_workers,
-                                 collate_fn=collate_fn, pin_memory=pin_memory)
-    if return_test:
-        return train_loader, val_loader, test_loader
-    else:
-        return train_loader, val_loader
+from pymatgen.analysis.structure_analyzer import VoronoiConnectivity
 
 
 def collate_pool(dataset_list):
@@ -114,9 +51,8 @@ def collate_pool(dataset_list):
     """
     batch_atom_fea, batch_nbr_fea, batch_nbr_fea_idx = [], [], []
     crystal_atom_idx, batch_target = [], []
-    batch_cif_ids = []
     base_idx = 0
-    for i, ((atom_fea, nbr_fea, nbr_fea_idx), target, cif_id)\
+    for i, ((atom_fea, nbr_fea, nbr_fea_idx), target)\
             in enumerate(dataset_list):
         n_i = atom_fea.shape[0]  # number of atoms for this crystal
         batch_atom_fea.append(atom_fea)
@@ -125,14 +61,12 @@ def collate_pool(dataset_list):
         new_idx = torch.LongTensor(np.arange(n_i)+base_idx)
         crystal_atom_idx.append(new_idx)
         batch_target.append(target)
-        batch_cif_ids.append(cif_id)
         base_idx += n_i
-    return (torch.cat(batch_atom_fea, dim=0),
-            torch.cat(batch_nbr_fea, dim=0),
-            torch.cat(batch_nbr_fea_idx, dim=0),
-            crystal_atom_idx),\
-        torch.stack(batch_target, dim=0),\
-        batch_cif_ids
+    return {'atom_fea':torch.cat(batch_atom_fea, dim=0), 
+            'nbr_fea':torch.cat(batch_nbr_fea, dim=0), 
+            'nbr_fea_idx':torch.cat(batch_nbr_fea_idx, dim=0), 
+            'crystal_atom_idx':crystal_atom_idx}, \
+            torch.stack(batch_target, dim=0)
 
 
 class GaussianDistance(object):
@@ -233,8 +167,11 @@ class AtomCustomJSONInitializer(AtomInitializer):
             self._embedding[key] = np.array(value, dtype=float)
 
 
-class CIFData(Dataset):
+class StructureData(Dataset):
     """
+    
+    RE-COMMENT THIS 
+    
     The CIFData dataset is a wrapper for a dataset where the crystal structures
     are stored in the form of CIF files. The dataset should have the following
     directory structure:
@@ -281,56 +218,77 @@ class CIFData(Dataset):
     target: torch.Tensor shape (1, )
     cif_id: str or int
     """
-    def __init__(self, root_dir, max_num_nbr=12, radius=8, dmin=0, step=0.2,
-                 random_seed=123):
-        self.root_dir = root_dir
+    def __init__(self, structure_list, target_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2,
+                 random_seed=123, use_voronoi=True):
+        self.atom_init_loc = atom_init_loc
         self.max_num_nbr, self.radius = max_num_nbr, radius
-        assert os.path.exists(root_dir), 'root_dir does not exist!'
-        id_prop_file = os.path.join(self.root_dir, 'id_prop.csv')
-        assert os.path.exists(id_prop_file), 'id_prop.csv does not exist!'
-        with open(id_prop_file) as f:
-            reader = csv.reader(f)
-            self.id_prop_data = [row for row in reader]
-        random.seed(random_seed)
-        random.shuffle(self.id_prop_data)
-        atom_init_file = os.path.join(self.root_dir, 'atom_init.json')
-        assert os.path.exists(atom_init_file), 'atom_init.json does not exist!'
-        self.ari = AtomCustomJSONInitializer(atom_init_file)
+        self.structure_list = structure_list
+        self.target_list = target_list
+        self.use_voronoi = use_voronoi
+        assert os.path.exists(self.atom_init_loc), 'atom_init.json does not exist!'
+        self.ari = AtomCustomJSONInitializer(atom_init_loc)
         self.gdf = GaussianDistance(dmin=dmin, dmax=self.radius, step=step)
 
     def __len__(self):
-        return len(self.id_prop_data)
+        return len(self.structure_list)
 
     @functools.lru_cache(maxsize=None)  # Cache loaded structures
     def __getitem__(self, idx):
-        cif_id, target = self.id_prop_data[idx]
-        crystal = Structure.from_file(os.path.join(self.root_dir,
-                                                   cif_id+'.cif'))
+        crystal = self.structure_list[idx]
+        target = self.target_list[idx]
+        
+
         atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
                               for i in range(len(crystal))])
         atom_fea = torch.Tensor(atom_fea)
-        all_nbrs = crystal.get_all_neighbors(self.radius, include_index=True)
-        all_nbrs = [sorted(nbrs, key=lambda x: x[1]) for nbrs in all_nbrs]
-        nbr_fea_idx, nbr_fea = [], []
-        for nbr in all_nbrs:
-            if len(nbr) < self.max_num_nbr:
-                warnings.warn('{} not find enough neighbors to build graph. '
-                              'If it happens frequently, consider increase '
-                              'radius.'.format(cif_id))
-                nbr_fea_idx.append(list(map(lambda x: x[2], nbr)) +
-                                   [0] * (self.max_num_nbr - len(nbr)))
-                nbr_fea.append(list(map(lambda x: x[1], nbr)) +
-                               [self.radius + 1.] * (self.max_num_nbr -
-                                                     len(nbr)))
-            else:
-                nbr_fea_idx.append(list(map(lambda x: x[2],
+        
+        if self.use_voronoi:
+            VC = VoronoiConnectivity(crystal)
+
+            all_nbrs = []
+            conn = VC.connectivity_array
+            for ii in range(0, conn.shape[0]):
+                curnbr = []
+                for jj in range(0, conn.shape[1]):
+                    for kk in range(0,conn.shape[2]):
+                        if conn[ii][jj][kk] != 0:
+                            curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
+                            #curnbr.append([ii, conn[ii][jj][kk], jj])
+                        else:
+                            curnbr.append([ii, 0.0, jj])
+                all_nbrs.append(np.array(curnbr))
+
+            all_nbrs = np.array(all_nbrs)
+            #print(all_nbrs)
+            all_nbrs = [sorted(nbrs, key=lambda x: x[1],reverse=True) for nbrs in all_nbrs]
+            
+            all_nbrs = [sorted(nbrs, key=lambda x: x[1],reverse=True) for nbrs in all_nbrs]
+            nbr_fea_idx = np.array([list(map(lambda x: x[2],
+                                    nbr[:self.max_num_nbr])) for nbr in all_nbrs])
+            nbr_fea = np.array([list(map(lambda x: x[1], nbr[:self.max_num_nbr]))
+                                for nbr in all_nbrs])
+            nbr_fea = self.gdf.expand(nbr_fea)
+        else:
+            all_nbrs = crystal.get_all_neighbors(self.radius, include_index=True)
+            all_nbrs = [sorted(nbrs, key=lambda x: x[1]) for nbrs in all_nbrs]
+            nbr_fea_idx, nbr_fea = [], []
+            for nbr in all_nbrs:
+                if len(nbr) < self.max_num_nbr:
+                    nbr_fea_idx.append(list(map(lambda x: x[2], nbr)) +
+                                       [0] * (self.max_num_nbr - len(nbr)))
+                    nbr_fea.append(list(map(lambda x: x[1], nbr)) +
+                                   [self.radius + 1.] * (self.max_num_nbr -
+                                                         len(nbr)))
+                else:
+                    nbr_fea_idx.append(list(map(lambda x: x[2],
+                                                nbr[:self.max_num_nbr])))
+                    nbr_fea.append(list(map(lambda x: x[1],
                                             nbr[:self.max_num_nbr])))
-                nbr_fea.append(list(map(lambda x: x[1],
-                                        nbr[:self.max_num_nbr])))
-        nbr_fea_idx, nbr_fea = np.array(nbr_fea_idx), np.array(nbr_fea)
-        nbr_fea = self.gdf.expand(nbr_fea)
+            nbr_fea_idx, nbr_fea = np.array(nbr_fea_idx), np.array(nbr_fea)
+            nbr_fea = self.gdf.expand(nbr_fea)
+            
         atom_fea = torch.Tensor(atom_fea)
         nbr_fea = torch.Tensor(nbr_fea)
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
         target = torch.Tensor([float(target)])
-        return (atom_fea, nbr_fea, nbr_fea_idx), target, cif_id
+        return (atom_fea, nbr_fea, nbr_fea_idx), target
