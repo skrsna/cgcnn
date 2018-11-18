@@ -14,6 +14,9 @@ from torch.utils.data.dataloader import default_collate
 from torch.utils.data.sampler import SubsetRandomSampler
 from pymatgen.core.structure import Structure
 from pymatgen.analysis.structure_analyzer import VoronoiConnectivity
+from ase.constraints import FixAtoms
+from pymatgen.io.ase import AseAtomsAdaptor
+
 
 
 def collate_pool(dataset_list):
@@ -218,29 +221,41 @@ class StructureData(Dataset):
     target: torch.Tensor shape (1, )
     cif_id: str or int
     """
-    def __init__(self, structure_list, target_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2,
-                 random_seed=123, use_voronoi=True):
+    def __init__(self, atoms_list, target_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=True, use_tag=True):
+        
+        self.target_list = target_list
+        self.atoms_list = atoms_list
+        
         self.atom_init_loc = atom_init_loc
         self.max_num_nbr, self.radius = max_num_nbr, radius
-        self.structure_list = structure_list
-        self.target_list = target_list
         self.use_voronoi = use_voronoi
         assert os.path.exists(self.atom_init_loc), 'atom_init.json does not exist!'
         self.ari = AtomCustomJSONInitializer(atom_init_loc)
         self.gdf = GaussianDistance(dmin=dmin, dmax=self.radius, step=step)
+        self.use_fixed_info = use_fixed_info
+        self.use_tag = use_tag
 
     def __len__(self):
-        return len(self.structure_list)
+        return len(self.atoms_list)
 
-    @functools.lru_cache(maxsize=None)  # Cache loaded structures
+    #@functools.lru_cache(maxsize=None)  # Cache loaded structures
     def __getitem__(self, idx):
-        crystal = self.structure_list[idx]
+        atoms = self.atoms_list[idx]
+        crystal = AseAtomsAdaptor.get_structure(atoms)
+        
         target = self.target_list[idx]
         
-
         atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
                               for i in range(len(crystal))])
-        atom_fea = torch.Tensor(atom_fea)
+        if self.use_tag:
+            atom_fea = np.hstack([atom_fea,atoms.get_tags().reshape((-1,1))])
+        if self.use_fixed_info:
+            fix_loc, = np.where([type(constraint)==FixAtoms for constraint in atoms.constraints])
+            fix_atoms_indices = set(atoms.constraints[fix_loc[0]].get_indices())
+            fixed_atoms = np.array([i in fix_atoms_indices for i in range(len(atoms))]).reshape((-1,1))
+            atom_fea = np.hstack([atom_fea,fixed_atoms])
+                
+        #atom_fea = torch.Tensor(atom_fea)
         
         if self.use_voronoi:
             VC = VoronoiConnectivity(crystal)
@@ -287,8 +302,16 @@ class StructureData(Dataset):
             nbr_fea_idx, nbr_fea = np.array(nbr_fea_idx), np.array(nbr_fea)
             nbr_fea = self.gdf.expand(nbr_fea)
             
-        atom_fea = torch.Tensor(atom_fea)
-        nbr_fea = torch.Tensor(nbr_fea)
+        #print(atom_fea.shape)
+        #print(nbr_fea)
+        #print(torch.FloatTensor(nbr_fea))
+        
+        try:
+            nbr_fea = torch.Tensor(nbr_fea)
+        except RuntimeError:
+            print(nbr_fea)
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
+        atom_fea = torch.Tensor(atom_fea)
+
         target = torch.Tensor([float(target)])
         return (atom_fea, nbr_fea, nbr_fea_idx), target
