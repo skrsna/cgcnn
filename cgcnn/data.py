@@ -16,7 +16,8 @@ from pymatgen.core.structure import Structure
 from pymatgen.analysis.structure_analyzer import VoronoiConnectivity
 from ase.constraints import FixAtoms
 from pymatgen.io.ase import AseAtomsAdaptor
-
+from sklearn.base import TransformerMixin
+import mongo
 
 
 def collate_pool(dataset_list):
@@ -68,8 +69,7 @@ def collate_pool(dataset_list):
     return {'atom_fea':torch.cat(batch_atom_fea, dim=0), 
             'nbr_fea':torch.cat(batch_nbr_fea, dim=0), 
             'nbr_fea_idx':torch.cat(batch_nbr_fea_idx, dim=0), 
-            'crystal_atom_idx':crystal_atom_idx}, \
-            torch.stack(batch_target, dim=0)
+            'crystal_atom_idx':crystal_atom_idx}, torch.stack(batch_target, dim=0)
 
 
 class GaussianDistance(object):
@@ -170,7 +170,7 @@ class AtomCustomJSONInitializer(AtomInitializer):
             self._embedding[key] = np.array(value, dtype=float)
 
 
-class StructureData(Dataset):
+class StructureData():
     """
     
     RE-COMMENT THIS 
@@ -221,9 +221,9 @@ class StructureData(Dataset):
     target: torch.Tensor shape (1, )
     cif_id: str or int
     """
-    def __init__(self, atoms_list, target_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=True, use_tag=True):
+    def __init__(self, atoms_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=True, use_tag=True):
         
-        self.target_list = target_list
+        #self.target_list = target_list
         self.atoms_list = atoms_list
         
         self.atom_init_loc = atom_init_loc
@@ -238,12 +238,12 @@ class StructureData(Dataset):
     def __len__(self):
         return len(self.atoms_list)
 
-    #@functools.lru_cache(maxsize=None)  # Cache loaded structures
+    @functools.lru_cache(maxsize=None)  # Cache loaded structures
     def __getitem__(self, idx):
         atoms = self.atoms_list[idx]
         crystal = AseAtomsAdaptor.get_structure(atoms)
         
-        target = self.target_list[idx]
+        #target = self.target_list[idx]
         
         atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
                               for i in range(len(crystal))])
@@ -313,5 +313,62 @@ class StructureData(Dataset):
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
         atom_fea = torch.Tensor(atom_fea)
 
-        target = torch.Tensor([float(target)])
-        return (atom_fea, nbr_fea, nbr_fea_idx), target
+        #target = torch.Tensor([float(target)])
+        return (atom_fea, nbr_fea, nbr_fea_idx)
+
+class ListDataset():
+    def __init__(self, list_in):
+        self.list = list_in
+        
+    def __len__(self):
+        return len(self.list)
+
+    def __getitem__(self, idx):
+        return self.list[idx]
+
+class StructureDataTransformer(TransformerMixin):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+        return
+    
+    def transform(self,X):
+        structure_list = [mongo.make_atoms_from_doc(doc) for doc in X]
+        SD = StructureData(structure_list, *self.args, **self.kwargs)
+        return SD
+
+    def fit(self,*_):
+        return self
+
+
+
+
+class MergeDataset(torch.utils.data.Dataset):
+    #Simple custom dataset to combine two datasets 
+    # (one for input X, one for label y)
+    def __init__(
+            self,
+            X,
+            y,
+            length=None,
+    ):
+
+        self.X = X
+        self.y = y
+
+        len_X = len(X)
+        if y is not None:
+            len_y = len(y)
+            if len_y != len_X:
+                raise ValueError("X and y have inconsistent lengths.")
+        self._len = len_X
+
+    def __len__(self):
+        return self._len
+
+    def __getitem__(self, i):
+        X, y = self.X, self.y
+
+        return X[i],y[i]
+
+

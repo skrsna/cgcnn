@@ -122,6 +122,10 @@ class CrystalGraphConvNet(nn.Module):
         if self.classification:
             self.logsoftmax = nn.LogSoftmax()
             self.dropout = nn.Dropout()
+            
+        #self.to('cuda',non_blocking=True)
+        #for module in self.convs:
+        #    module.to('cuda',non_blocking=True)
 
     def forward(self, atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx):
         """
