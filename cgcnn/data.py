@@ -69,7 +69,7 @@ def collate_pool(dataset_list):
     return {'atom_fea':torch.cat(batch_atom_fea, dim=0), 
             'nbr_fea':torch.cat(batch_nbr_fea, dim=0), 
             'nbr_fea_idx':torch.cat(batch_nbr_fea_idx, dim=0), 
-            'crystal_atom_idx':crystal_atom_idx}, torch.stack(batch_target, dim=0)
+            'crystal_atom_idx':crystal_atom_idx}, torch.FloatTensor(batch_target)
 
 
 class GaussianDistance(object):
@@ -267,8 +267,14 @@ class StructureData():
                 for jj in range(0, conn.shape[1]):
                     for kk in range(0,conn.shape[2]):
                         if conn[ii][jj][kk] != 0:
-                            curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
-                            #curnbr.append([ii, conn[ii][jj][kk], jj])
+#                             if self.use_tag and (atoms.get_tags()[ii]==1 or atoms.get_tags()[jj]==1):
+#                                 if conn[ii][jj][kk]/np.max(conn[ii])>0.8:
+#                                     curnbr.append([ii, 0.8, jj])
+#                                 else:
+#                                     curnbr.append([ii, 0.0, jj])
+#                             else:
+#                                 curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
+                            curnbr.append([ii, conn[ii][jj][kk], jj])
                         else:
                             curnbr.append([ii, 0.0, jj])
                 all_nbrs.append(np.array(curnbr))
@@ -368,7 +374,12 @@ class MergeDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, i):
         X, y = self.X, self.y
+        
+        if y is not None:
+            yi = y[i]
+        else:
+            yi = np.nan
 
-        return X[i],y[i]
+        return X[i], yi
 
 
