@@ -274,7 +274,7 @@ class StructureData():
 #                                     curnbr.append([ii, 0.0, jj])
 #                             else:
 #                                 curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
-                            curnbr.append([ii, conn[ii][jj][kk], jj])
+                            curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
                         else:
                             curnbr.append([ii, 0.0, jj])
                 all_nbrs.append(np.array(curnbr))
