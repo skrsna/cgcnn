@@ -18,7 +18,7 @@ from ase.constraints import FixAtoms
 from pymatgen.io.ase import AseAtomsAdaptor
 from sklearn.base import TransformerMixin
 import mongo
-
+import copy
 
 def collate_pool(dataset_list):
     """
@@ -221,10 +221,14 @@ class StructureData():
     target: torch.Tensor shape (1, )
     cif_id: str or int
     """
-    def __init__(self, atoms_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=True, use_tag=True):
+    def __init__(self, atoms_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=False, use_tag=False):
         
         #self.target_list = target_list
-        self.atoms_list = atoms_list
+
+        #this copy is very important; otherwise things ran, but there was some sort 
+        # of shuffle that was affecting the real list, resulting in weird loss
+        # loss functions and poor training
+        self.atoms_list = copy.deepcopy(atoms_list)
         
         self.atom_init_loc = atom_init_loc
         self.max_num_nbr, self.radius = max_num_nbr, radius
@@ -238,13 +242,10 @@ class StructureData():
     def __len__(self):
         return len(self.atoms_list)
 
-    @functools.lru_cache(maxsize=None)  # Cache loaded structures
     def __getitem__(self, idx):
-        atoms = self.atoms_list[idx]
+        atoms = copy.deepcopy(self.atoms_list[idx])
         crystal = AseAtomsAdaptor.get_structure(atoms)
-        
-        #target = self.target_list[idx]
-        
+
         atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
                               for i in range(len(crystal))])
         if self.use_tag:
@@ -254,9 +255,7 @@ class StructureData():
             fix_atoms_indices = set(atoms.constraints[fix_loc[0]].get_indices())
             fixed_atoms = np.array([i in fix_atoms_indices for i in range(len(atoms))]).reshape((-1,1))
             atom_fea = np.hstack([atom_fea,fixed_atoms])
-                
-        #atom_fea = torch.Tensor(atom_fea)
-        
+
         if self.use_voronoi:
             VC = VoronoiConnectivity(crystal)
 
@@ -266,7 +265,7 @@ class StructureData():
                 curnbr = []
                 for jj in range(0, conn.shape[1]):
                     for kk in range(0,conn.shape[2]):
-                        if conn[ii][jj][kk] != 0:
+                        if jj is not kk and conn[ii][jj][kk] != 0:
 #                             if self.use_tag and (atoms.get_tags()[ii]==1 or atoms.get_tags()[jj]==1):
 #                                 if conn[ii][jj][kk]/np.max(conn[ii])>0.8:
 #                                     curnbr.append([ii, 0.8, jj])
@@ -275,14 +274,12 @@ class StructureData():
 #                             else:
 #                                 curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
                             curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
+                            #curnbr.append([ii, conn[ii][jj][kk], jj])
                         else:
                             curnbr.append([ii, 0.0, jj])
                 all_nbrs.append(np.array(curnbr))
 
             all_nbrs = np.array(all_nbrs)
-            #print(all_nbrs)
-            all_nbrs = [sorted(nbrs, key=lambda x: x[1],reverse=True) for nbrs in all_nbrs]
-            
             all_nbrs = [sorted(nbrs, key=lambda x: x[1],reverse=True) for nbrs in all_nbrs]
             nbr_fea_idx = np.array([list(map(lambda x: x[2],
                                     nbr[:self.max_num_nbr])) for nbr in all_nbrs])
@@ -307,11 +304,7 @@ class StructureData():
                                             nbr[:self.max_num_nbr])))
             nbr_fea_idx, nbr_fea = np.array(nbr_fea_idx), np.array(nbr_fea)
             nbr_fea = self.gdf.expand(nbr_fea)
-            
-        #print(atom_fea.shape)
-        #print(nbr_fea)
-        #print(torch.FloatTensor(nbr_fea))
-        
+
         try:
             nbr_fea = torch.Tensor(nbr_fea)
         except RuntimeError:
@@ -319,7 +312,6 @@ class StructureData():
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
         atom_fea = torch.Tensor(atom_fea)
 
-        #target = torch.Tensor([float(target)])
         return (atom_fea, nbr_fea, nbr_fea_idx)
 
 class ListDataset():
@@ -360,7 +352,7 @@ class MergeDataset(torch.utils.data.Dataset):
     ):
 
         self.X = X
-        self.y = y
+        self.y = copy.deepcopy(y)
 
         len_X = len(X)
         if y is not None:
@@ -372,11 +364,12 @@ class MergeDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._len
 
+    @functools.lru_cache(maxsize=None)
     def __getitem__(self, i):
         X, y = self.X, self.y
         
         if y is not None:
-            yi = y[i]
+            yi = copy.deepcopy(y[i])
         else:
             yi = np.nan
 
