@@ -14,6 +14,7 @@ from torch.utils.data.dataloader import default_collate
 from torch.utils.data.sampler import SubsetRandomSampler
 from pymatgen.core.structure import Structure
 from pymatgen.analysis.structure_analyzer import VoronoiConnectivity
+from sklearn.preprocessing import OneHotEncoder
 from ase.constraints import FixAtoms
 from pymatgen.io.ase import AseAtomsAdaptor
 from sklearn.base import TransformerMixin
@@ -221,7 +222,7 @@ class StructureData():
     target: torch.Tensor shape (1, )
     cif_id: str or int
     """
-    def __init__(self, atoms_list, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=False, use_tag=False):
+    def __init__(self, atoms_list, atoms_list_initial_config, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=False, use_tag=False, use_distance=False):
         
         #self.target_list = target_list
 
@@ -229,6 +230,7 @@ class StructureData():
         # of shuffle that was affecting the real list, resulting in weird loss
         # loss functions and poor training
         self.atoms_list = copy.deepcopy(atoms_list)
+        self.atoms_list_initial_config = copy.deepcopy(atoms_list_initial_config)
         
         self.atom_init_loc = atom_init_loc
         self.max_num_nbr, self.radius = max_num_nbr, radius
@@ -238,6 +240,7 @@ class StructureData():
         self.gdf = GaussianDistance(dmin=dmin, dmax=self.radius, step=step)
         self.use_fixed_info = use_fixed_info
         self.use_tag = use_tag
+        self.use_distance = use_distance
 
     def __len__(self):
         return len(self.atoms_list)
@@ -245,7 +248,9 @@ class StructureData():
     def __getitem__(self, idx):
         atoms = copy.deepcopy(self.atoms_list[idx])
         crystal = AseAtomsAdaptor.get_structure(atoms)
-
+        atoms_initial_config = copy.deepcopy(self.atoms_list_initial_config[idx])
+        crystal_initial_config = AseAtomsAdaptor.get_structure(atoms_initial_config)
+        
         atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
                               for i in range(len(crystal))])
         if self.use_tag:
@@ -258,26 +263,33 @@ class StructureData():
 
         if self.use_voronoi:
             VC = VoronoiConnectivity(crystal)
+            VC_initial_config = VoronoiConnectivity(crystal_initial_config)
 
             all_nbrs = []
-            conn = VC.connectivity_array
+            conn = copy.deepcopy(VC.connectivity_array)
+            conn_initial_config = copy.deepcopy(VC_initial_config.connectivity_array)
+
             for ii in range(0, conn.shape[0]):
                 curnbr = []
                 for jj in range(0, conn.shape[1]):
                     for kk in range(0,conn.shape[2]):
                         if jj is not kk and conn[ii][jj][kk] != 0:
-#                             if self.use_tag and (atoms.get_tags()[ii]==1 or atoms.get_tags()[jj]==1):
-#                                 if conn[ii][jj][kk]/np.max(conn[ii])>0.8:
-#                                     curnbr.append([ii, 0.8, jj])
-#                                 else:
-#                                     curnbr.append([ii, 0.0, jj])
-#                             else:
-#                                 curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
-                            curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
+                            if self.use_tag:
+                                if (atoms.get_tags()[ii]==1 or atoms.get_tags()[jj]==1):
+                                    if conn[ii][jj][kk]/np.max(conn[ii])>0.3:
+                                        curnbr.append([ii, 1.0, jj])
+                                    else:
+                                        curnbr.append([ii, 0.0, jj])
+                                else:
+                                    curnbr.append([ii, conn_initial_config[ii][jj][kk]/np.max(conn_initial_config[ii]), jj])
+                            else:
+                                curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
                             #curnbr.append([ii, conn[ii][jj][kk], jj])
                         else:
                             curnbr.append([ii, 0.0, jj])
                 all_nbrs.append(np.array(curnbr))
+            if self.use_distance:
+                atom_fea = np.hstack([atom_fea,distance_to_adsorbate_feature(atoms, VC)])
 
             all_nbrs = np.array(all_nbrs)
             all_nbrs = [sorted(nbrs, key=lambda x: x[1],reverse=True) for nbrs in all_nbrs]
@@ -332,7 +344,9 @@ class StructureDataTransformer(TransformerMixin):
     
     def transform(self,X):
         structure_list = [mongo.make_atoms_from_doc(doc) for doc in X]
-        SD = StructureData(structure_list, *self.args, **self.kwargs)
+        structure_list_orig = [mongo.make_atoms_from_doc(doc['initial_configuration']) for doc in X]
+
+        SD = StructureData(structure_list, structure_list_orig, *self.args, **self.kwargs)
         return SD
 
     def fit(self,*_):
@@ -375,4 +389,41 @@ class MergeDataset(torch.utils.data.Dataset):
 
         return X[i], yi
 
+def distance_to_adsorbate_feature(atoms, VC, max_dist = 6):
+    
+    # This function looks at an atoms object and attempts to find
+    # the minimum distance from each atom to one of the adsorbate 
+    # atoms (marked witht tag==1)
+    conn = copy.deepcopy(VC.connectivity_array)
+    conn = np.max(conn,2)
+
+    for i in range(len(conn)):
+        conn[i]=conn[i]/np.max(conn[i])
+
+    #get a binary connectivity matrix
+    conn=(conn>0.3)*1
+    
+    #Everything is connected to itself, so add a matrix with zero on the diagonal 
+    # and a large number on the off-diagonal
+    ident_connection = np.eye(len(conn))
+    ident_connection[ident_connection==0]=max_dist+1
+    ident_connection[ident_connection==1]=0
+
+    #For each distance, add an array of atoms that can be connected at that distance
+    arrays = [ident_connection]
+    for i in range(1,max_dist):
+        arrays.append((np.linalg.matrix_power(conn,i)>=1)*i+(np.linalg.matrix_power(conn,i)==0)*(max_dist+1))
+
+    #Find the minimum distance from each atom to every other atom (over possible distances)
+    arrays=np.min(arrays,0)
+
+    # Find the minimum distance from one of the adsorbate atoms to the other atoms
+    min_distance_to_adsorbate = np.min(arrays[atoms.get_tags()==1],0).reshape((-1,1))
+    
+    #Make sure all of the one hot distance vectors are encoded to the same length. 
+    # Encode, return
+    min_distance_to_adsorbate[min_distance_to_adsorbate>=max_dist]=max_dist-1
+    OHE = OneHotEncoder(categories=[range(max_dist)]).fit(min_distance_to_adsorbate)
+    return OHE.transform(min_distance_to_adsorbate).toarray()
+ 
 
