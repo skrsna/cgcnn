@@ -202,7 +202,7 @@ class CrystalGraphConvNet(nn.Module):
         assert sum([len(idx_map) for idx_map in crystal_atom_idx]) ==\
             atom_fea.data.shape[0]
         if self.visualization: #If visualization, total energy is a contribution for each atom
-            summed_fea = [torch.sum(atom_fea[idx_map], dim=0, keepdim=True)
+            summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
                       for idx_map in crystal_atom_idx]
         else:
             summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
