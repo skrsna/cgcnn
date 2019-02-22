@@ -82,7 +82,7 @@ class CrystalGraphConvNet(nn.Module):
     """
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=64, n_conv=3, h_fea_len=128, n_h=1,
-                 classification=False):
+                 classification=False, visualization=False):
         """
         Initialize CrystalGraphConvNet.
 
@@ -108,7 +108,15 @@ class CrystalGraphConvNet(nn.Module):
         self.convs = nn.ModuleList([ConvLayer(atom_fea_len=atom_fea_len,
                                     nbr_fea_len=nbr_fea_len)
                                     for _ in range(n_conv)])
-        self.conv_to_fc = nn.Linear(atom_fea_len, h_fea_len)
+        
+        self.visualization=visualization
+        if self.visualization:
+            self.conv_to_fc = nn.Linear(1, h_fea_len)
+            self.visualization_layer = nn.Linear(atom_fea_len, 1)
+        else:
+            self.conv_to_fc = nn.Linear(atom_fea_len, h_fea_len)
+
+            
         self.conv_to_fc_softplus = nn.LeakyReLU()
         if n_h > 1:
             self.fcs = nn.ModuleList([nn.Linear(h_fea_len, h_fea_len)
@@ -159,17 +167,21 @@ class CrystalGraphConvNet(nn.Module):
         atom_fea = self.embedding(atom_fea)
         for conv_func in self.convs:
             atom_fea = conv_func(atom_fea, nbr_fea, nbr_fea_idx)
-        crys_fea = self.pooling(atom_fea, crystal_atom_idx)
-        crys_fea = self.conv_to_fc(self.conv_to_fc_softplus(crys_fea))
-        crys_fea = self.conv_to_fc_softplus(crys_fea)
-        if self.classification:
-            crys_fea = self.dropout(crys_fea)
-        if hasattr(self, 'fcs') and hasattr(self, 'softpluses'):
-            for fc, softplus,bn in zip(self.fcs, self.softpluses, self.bn):
-                crys_fea = softplus(bn(fc(crys_fea)))
-        out = self.fc_out(crys_fea)
-        if self.classification:
-            out = self.logsoftmax(out)
+        if self.visualization:
+            atom_fea = self.visualization_layer(atom_fea)
+            return self.pooling(atom_fea, crystal_atom_idx)
+        else:
+            crys_fea = self.pooling(atom_fea, crystal_atom_idx)
+            crys_fea = self.conv_to_fc(self.conv_to_fc_softplus(crys_fea))
+            crys_fea = self.conv_to_fc_softplus(crys_fea)
+            if self.classification:
+                crys_fea = self.dropout(crys_fea)
+            if hasattr(self, 'fcs') and hasattr(self, 'softpluses'):
+                for fc, softplus,bn in zip(self.fcs, self.softpluses, self.bn):
+                    crys_fea = softplus(bn(fc(crys_fea)))
+            out = self.fc_out(crys_fea)
+            if self.classification:
+                out = self.logsoftmax(out)
         return out
 
     def pooling(self, atom_fea, crystal_atom_idx):
@@ -189,6 +201,10 @@ class CrystalGraphConvNet(nn.Module):
         """
         assert sum([len(idx_map) for idx_map in crystal_atom_idx]) ==\
             atom_fea.data.shape[0]
-        summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
+        if self.visualization: #If visualization, total energy is a contribution for each atom
+            summed_fea = [torch.sum(atom_fea[idx_map], dim=0, keepdim=True)
+                      for idx_map in crystal_atom_idx]
+        else:
+            summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
                       for idx_map in crystal_atom_idx]
         return torch.cat(summed_fea, dim=0)
