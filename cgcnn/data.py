@@ -54,13 +54,14 @@ def collate_pool(dataset_list):
       Target value for prediction
     batch_cif_ids: list
     """
-    batch_atom_fea, batch_nbr_fea, batch_nbr_fea_idx = [], [], []
+    batch_atom_fea, batch_nbr_fea, batch_nbr_fea_idx, batch_distances = [], [], [], []
     crystal_atom_idx, batch_target = [], []
     base_idx = 0
-    for i, ((atom_fea, nbr_fea, nbr_fea_idx), target)\
+    for i, ((atom_fea, nbr_fea, nbr_fea_idx, distances), target)\
             in enumerate(dataset_list):
         n_i = atom_fea.shape[0]  # number of atoms for this crystal
         batch_atom_fea.append(atom_fea)
+        batch_distances.append(distances)
         batch_nbr_fea.append(nbr_fea)
         batch_nbr_fea_idx.append(nbr_fea_idx+base_idx)
         new_idx = torch.LongTensor(np.arange(n_i)+base_idx)
@@ -70,6 +71,7 @@ def collate_pool(dataset_list):
     return {'atom_fea':torch.cat(batch_atom_fea, dim=0), 
             'nbr_fea':torch.cat(batch_nbr_fea, dim=0), 
             'nbr_fea_idx':torch.cat(batch_nbr_fea_idx, dim=0), 
+            'distances':torch.cat(batch_distances,dim=0),
             'crystal_atom_idx':crystal_atom_idx}, torch.FloatTensor(batch_target)
 
 
@@ -289,7 +291,8 @@ class StructureData():
                             curnbr.append([ii, 0.0, jj])
                 all_nbrs.append(np.array(curnbr))
             if self.use_distance:
-                atom_fea = np.hstack([atom_fea,distance_to_adsorbate_feature(atoms, VC)])
+                distances, distances_OHE = distance_to_adsorbate_feature(atoms, VC)
+                atom_fea = np.hstack([atom_fea,distances_OHE])
 
             all_nbrs = np.array(all_nbrs)
             all_nbrs = [sorted(nbrs, key=lambda x: x[1],reverse=True) for nbrs in all_nbrs]
@@ -322,9 +325,10 @@ class StructureData():
         except RuntimeError:
             print(nbr_fea)
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
+        distances=torch.LongTensor(distances)
         atom_fea = torch.Tensor(atom_fea)
 
-        return (atom_fea, nbr_fea, nbr_fea_idx)
+        return (atom_fea, nbr_fea, nbr_fea_idx, distances)
 
 class ListDataset():
     def __init__(self, list_in):
@@ -424,6 +428,7 @@ def distance_to_adsorbate_feature(atoms, VC, max_dist = 6):
     # Encode, return
     min_distance_to_adsorbate[min_distance_to_adsorbate>=max_dist]=max_dist-1
     OHE = OneHotEncoder(categories=[range(max_dist)]).fit(min_distance_to_adsorbate)
-    return OHE.transform(min_distance_to_adsorbate).toarray()
+    return min_distance_to_adsorbate, OHE.transform(min_distance_to_adsorbate).toarray()
+
  
 

@@ -82,7 +82,7 @@ class CrystalGraphConvNet(nn.Module):
     """
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=64, n_conv=3, h_fea_len=128, n_h=1,
-                 classification=False, visualization=False):
+                 classification=False, visualization=False, max_connectivity=1):
         """
         Initialize CrystalGraphConvNet.
 
@@ -134,10 +134,11 @@ class CrystalGraphConvNet(nn.Module):
             self.dropout = nn.Dropout()
             
         self.to('cuda',non_blocking=True)
+        self.max_connectivity=max_connectivity
         for module in self.convs:
            module.to('cuda',non_blocking=True)
 
-    def forward(self, atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx):
+    def forward(self, atom_fea, nbr_fea, nbr_fea_idx, distances, crystal_atom_idx):
         """
         Forward pass
 
@@ -169,9 +170,9 @@ class CrystalGraphConvNet(nn.Module):
             atom_fea = conv_func(atom_fea, nbr_fea, nbr_fea_idx)
         if self.visualization:
             atom_fea = self.visualization_layer(atom_fea)
-            return self.pooling(atom_fea, crystal_atom_idx)
+            return self.pooling(atom_fea, distances, crystal_atom_idx)
         else:
-            crys_fea = self.pooling(atom_fea, crystal_atom_idx)
+            crys_fea = self.pooling(atom_fea, distances, crystal_atom_idx)
             crys_fea = self.conv_to_fc(self.conv_to_fc_softplus(crys_fea))
             crys_fea = self.conv_to_fc_softplus(crys_fea)
             if self.classification:
@@ -184,7 +185,7 @@ class CrystalGraphConvNet(nn.Module):
                 out = self.logsoftmax(out)
         return out
 
-    def pooling(self, atom_fea, crystal_atom_idx):
+    def pooling(self, atom_fea, distances, crystal_atom_idx):
         """
         Pooling the atom features to crystal features
 
@@ -202,9 +203,17 @@ class CrystalGraphConvNet(nn.Module):
         assert sum([len(idx_map) for idx_map in crystal_atom_idx]) ==\
             atom_fea.data.shape[0]
         if self.visualization: #If visualization, total energy is a contribution for each atom
-            summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
-                      for idx_map in crystal_atom_idx]
+            #indices = torch.cuda.LongTensor(list(range(4)))
+#             print([torch.mean(atom_fea[idx_map][distances[idx_map]<=2])
+#                       for idx_map in crystal_atom_idx])
+                                 
+            summed_fea = torch.unsqueeze(torch.stack([torch.mean(atom_fea[idx_map][distances[idx_map]<=self.max_connectivity])
+                      for idx_map in crystal_atom_idx]),1)
         else:
-            summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
-                      for idx_map in crystal_atom_idx]
-        return torch.cat(summed_fea, dim=0)
+#             summed_fea = torch.cat([torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
+#                       for idx_map in crystal_atom_idx], dim=0)
+            summed_fea = torch.cat(
+                    [torch.mean(
+                        atom_fea[idx_map][distances[idx_map]<=self.max_connectivity,:])
+                     for idx_map in crystal_atom_idx], dim=0)
+        return summed_fea
