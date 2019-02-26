@@ -176,32 +176,18 @@ class StructureData():
     
     RE-COMMENT THIS 
     
-    The CIFData dataset is a wrapper for a dataset where the crystal structures
-    are stored in the form of CIF files. The dataset should have the following
-    directory structure:
-
-    root_dir
-    ├── id_prop.csv
-    ├── atom_init.json
-    ├── id0.cif
-    ├── id1.cif
-    ├── ...
-
-    id_prop.csv: a CSV file with two columns. The first column recodes a
-    unique ID for each crystal, and the second column recodes the value of
-    target property.
-
-    atom_init.json: a JSON file that stores the initialization vector for each
-    element.
-
-    ID.cif: a CIF file that recodes the crystal structure, where ID is the
-    unique ID for the crystal.
-
+    
     Parameters
     ----------
 
-    root_dir: str
-        The path to the root directory of the dataset
+    atoms_list: list of ASE atoms objects
+        List of ASE atoms objects (final relaxed geometry)
+    atoms_list_initial_config: list of ASE atoms objects
+        List of ASE atoms objects (initial unrelaxed geometry)
+        This is very important if the model will be used to predict
+        the properties of unrelaxed structures
+    atom_init_loc: str
+        The location of the atom_init.json file that contains atomic properties
     max_num_nbr: int
         The maximum number of neighbors while constructing the crystal graph
     radius: float
@@ -212,6 +198,30 @@ class StructureData():
         The step size for constructing GaussianDistance
     random_seed: int
         Random seed for shuffling the dataset
+    use_voronoi: bool
+        Controls whether the original (pair distance) or voronoi
+        method from pymatgen is used to determine neighbor lists 
+        and distances.
+    use_fixed_info: bool
+        If True, add whether each atom is fixed by ASE constraints as an atomic feature.
+        Hypothesized to improve the fit because there is information in the fixed
+        atoms being in the bulk
+    use_tag: 
+        If true, add the ASE tag as an atomic feature
+    use_distance:
+        If true, for each atom add a graph distance from the atom to the nearest atom
+        on the graph that has a tag of 1 (indicated it is an adsorbate atom in our scheme). 
+        This allows atoms near the adsorbate to have a higher influence if the model
+        deems it helpful.
+    train_geometry: str
+        If 'final', use the final relaxed structure for input to the graph
+        If 'initial' use the initial unrelaxed structure
+        If 'final-adsorbate', 'use the initial relax structure for everything with tag=0,
+            but add a fixed-edge feature to adsorbate atoms in the final configuration.
+            We did this so that the information from adsorbate movement (ex. on-top to bridge)
+            is included in the input space, but the final relaxed bond distance is not included.
+            This makes the method transferable to the predictions for unrelaxed structures with
+            various adsorbate locations
 
     Returns
     -------
@@ -219,13 +229,9 @@ class StructureData():
     atom_fea: torch.Tensor shape (n_i, atom_fea_len)
     nbr_fea: torch.Tensor shape (n_i, M, nbr_fea_len)
     nbr_fea_idx: torch.LongTensor shape (n_i, M)
-    target: torch.Tensor shape (1, )
-    cif_id: str or int
     """
-    def __init__(self, atoms_list, atoms_list_initial_config, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=False, use_tag=False, use_distance=False):
+    def __init__(self, atoms_list, atoms_list_initial_config, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=True, use_fixed_info=False, use_tag=False, use_distance=False, train_geometry='final-adsorbate'):
         
-        #self.target_list = target_list
-
         #this copy is very important; otherwise things ran, but there was some sort 
         # of shuffle that was affecting the real list, resulting in weird loss
         # loss functions and poor training
@@ -235,12 +241,17 @@ class StructureData():
         self.atom_init_loc = atom_init_loc
         self.max_num_nbr, self.radius = max_num_nbr, radius
         self.use_voronoi = use_voronoi
+        
+        #Load the atom features and gaussian distribution functions
         assert os.path.exists(self.atom_init_loc), 'atom_init.json does not exist!'
         self.ari = AtomCustomJSONInitializer(atom_init_loc)
         self.gdf = GaussianDistance(dmin=dmin, dmax=self.radius, step=step)
+        
+        #Store some tags inside the object for later use
         self.use_fixed_info = use_fixed_info
         self.use_tag = use_tag
         self.use_distance = use_distance
+        self.train_geometry = train_geometry #could be initial, final, or final-adsorbate?
 
     def __len__(self):
         return len(self.atoms_list)
@@ -251,30 +262,53 @@ class StructureData():
         atoms_initial_config = copy.deepcopy(self.atoms_list_initial_config[idx])
         crystal_initial_config = AseAtomsAdaptor.get_structure(atoms_initial_config)
         
+        #Stack the features from atom_init
         atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
                               for i in range(len(crystal))])
+                              
+        # If use_tag=True, then add the tag as an atom feature
         if self.use_tag:
             atom_fea = np.hstack([atom_fea,atoms.get_tags().reshape((-1,1))])
+            
+        # If use_fixed_info=True, then add whether the atom is fixed by ASE constraint to the features
         if self.use_fixed_info:
             fix_loc, = np.where([type(constraint)==FixAtoms for constraint in atoms.constraints])
             fix_atoms_indices = set(atoms.constraints[fix_loc[0]].get_indices())
             fixed_atoms = np.array([i in fix_atoms_indices for i in range(len(atoms))]).reshape((-1,1))
             atom_fea = np.hstack([atom_fea,fixed_atoms])
 
+        # If use_voronoi, then use the voronoi connectivity from pymatgen to determine neighbors and distances
         if self.use_voronoi:
+        
+            #Get the connectivity array for the initial and final structure
             VC = VoronoiConnectivity(crystal)
             VC_initial_config = VoronoiConnectivity(crystal_initial_config)
-
-            all_nbrs = []
             conn = copy.deepcopy(VC.connectivity_array)
             conn_initial_config = copy.deepcopy(VC_initial_config.connectivity_array)
-
+            
+            #Iterate through each atom, find it's neighbors, and add their distances
+            all_nbrs = []
+            
+            # Loop over central atom
             for ii in range(0, conn.shape[0]):
                 curnbr = []
+                
+                #Loop over neighbor atoms
                 for jj in range(0, conn.shape[1]):
+                
+                    #Loop over each possible PBC image for the chosen image
                     for kk in range(0,conn.shape[2]):
+                        # Only add as a neighbor if the atom is not the currently selected center one and there is connectivity
+                        # to that image
                         if jj is not kk and conn[ii][jj][kk] != 0:
-                            if self.use_tag:
+                        
+                            #Add the neighbor strength depending on train_geometry base
+                            if self.train_geometry =='initial':
+                                curnbr.append([ii, conn_initial_config[ii][jj][kk]/np.max(conn_initial_config[ii]), jj])
+                            elif self.train_geometry =='final':
+                                curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
+                            elif self.train_geometry == 'final-adsorbate':
+                                #In order for this to work, each adsorbate atom should be set to tag==1 in the atoms object
                                 if (atoms.get_tags()[ii]==1 or atoms.get_tags()[jj]==1):
                                     if conn[ii][jj][kk]/np.max(conn[ii])>0.3:
                                         curnbr.append([ii, 1.0, jj])
@@ -284,19 +318,23 @@ class StructureData():
                                     curnbr.append([ii, conn_initial_config[ii][jj][kk]/np.max(conn_initial_config[ii]), jj])
                             else:
                                 curnbr.append([ii, conn[ii][jj][kk]/np.max(conn[ii]), jj])
-                            #curnbr.append([ii, conn[ii][jj][kk], jj])
                         else:
                             curnbr.append([ii, 0.0, jj])
                 all_nbrs.append(np.array(curnbr))
+                
+            # If use_distance=True, then add the distance to an adsorbate (tag=1) as a feature
             if self.use_distance:
                 atom_fea = np.hstack([atom_fea,distance_to_adsorbate_feature(atoms, VC)])
 
+            #Find the strongest neighbors for each atom
             all_nbrs = np.array(all_nbrs)
             all_nbrs = [sorted(nbrs, key=lambda x: x[1],reverse=True) for nbrs in all_nbrs]
             nbr_fea_idx = np.array([list(map(lambda x: x[2],
                                     nbr[:self.max_num_nbr])) for nbr in all_nbrs])
             nbr_fea = np.array([list(map(lambda x: x[1], nbr[:self.max_num_nbr]))
                                 for nbr in all_nbrs])
+                                
+            #expand distance one-hot encoding with GDF
             nbr_fea = self.gdf.expand(nbr_fea)
         else:
             all_nbrs = crystal.get_all_neighbors(self.radius, include_index=True)
@@ -321,6 +359,7 @@ class StructureData():
             nbr_fea = torch.Tensor(nbr_fea)
         except RuntimeError:
             print(nbr_fea)
+            
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
         atom_fea = torch.Tensor(atom_fea)
 
@@ -389,11 +428,10 @@ class MergeDataset(torch.utils.data.Dataset):
 
         return X[i], yi
 
-def distance_to_adsorbate_feature(atoms, VC, max_dist = 6):
-    
+def distance_to_adsorbate_feature(atoms, VC, max_dist = 6):    
     # This function looks at an atoms object and attempts to find
     # the minimum distance from each atom to one of the adsorbate 
-    # atoms (marked witht tag==1)
+    # atoms (marked with tag==1)
     conn = copy.deepcopy(VC.connectivity_array)
     conn = np.max(conn,2)
 
