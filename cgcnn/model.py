@@ -27,10 +27,10 @@ class ConvLayer(nn.Module):
         self.fc_full = nn.Linear(2*self.atom_fea_len+self.nbr_fea_len,
                                  2*self.atom_fea_len)
         self.sigmoid = nn.Sigmoid()
-        self.softplus1 = nn.LeakyReLU()
+        self.softplus1 = nn.Softplus()
         self.bn1 = nn.BatchNorm1d(2*self.atom_fea_len)
         self.bn2 = nn.BatchNorm1d(self.atom_fea_len)
-        self.softplus2 = nn.LeakyReLU()
+        self.softplus2 = nn.Softplus()
 
     def forward(self, atom_in_fea, nbr_fea, nbr_fea_idx):
         """
@@ -109,14 +109,14 @@ class CrystalGraphConvNet(nn.Module):
                                     nbr_fea_len=nbr_fea_len)
                                     for _ in range(n_conv)])
         self.conv_to_fc = nn.Linear(atom_fea_len, h_fea_len)
-        self.conv_to_fc_softplus = nn.LeakyReLU()
+        self.conv_to_fc_softplus = nn.Softplus()
         if n_h > 1:
             self.fcs = nn.ModuleList([nn.Linear(h_fea_len, h_fea_len)
                                       for _ in range(n_h-1)])
-            self.softpluses = nn.ModuleList([nn.LeakyReLU()
+            self.softpluses = nn.ModuleList([nn.Softplus()
                                              for _ in range(n_h-1)])
-            self.bn = nn.ModuleList([nn.BatchNorm1d(h_fea_len)
-                                             for _ in range(n_h-1)])
+            #self.bn = nn.ModuleList([nn.BatchNorm1d(h_fea_len)
+            #                                 for _ in range(n_h-1)])
         if self.classification:
             self.fc_out = nn.Linear(h_fea_len, 2)
         else:
@@ -165,8 +165,8 @@ class CrystalGraphConvNet(nn.Module):
         if self.classification:
             crys_fea = self.dropout(crys_fea)
         if hasattr(self, 'fcs') and hasattr(self, 'softpluses'):
-            for fc, softplus,bn in zip(self.fcs, self.softpluses, self.bn):
-                crys_fea = softplus(bn(fc(crys_fea)))
+            for fc, softplus in zip(self.fcs, self.softpluses):
+                crys_fea = softplus(fc(crys_fea))
         out = self.fc_out(crys_fea)
         if self.classification:
             out = self.logsoftmax(out)

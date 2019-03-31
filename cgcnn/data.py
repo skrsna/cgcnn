@@ -417,7 +417,6 @@ class MergeDataset(torch.utils.data.Dataset):
     def __len__(self):
         return self._len
 
-    @functools.lru_cache(maxsize=None)
     def __getitem__(self, i):
         X, y = self.X, self.y
         
@@ -426,7 +425,7 @@ class MergeDataset(torch.utils.data.Dataset):
         else:
             yi = np.nan
 
-        return X[i], yi
+        return copy.deepcopy(X[i]), yi
 
 def distance_to_adsorbate_feature(atoms, VC, max_dist = 6):    
     # This function looks at an atoms object and attempts to find
