@@ -50,17 +50,30 @@ def collate_pool(dataset_list):
       Indices of M neighbors of each atom
     crystal_atom_idx: list of torch.LongTensor of length N0
       Mapping from the crystal idx to atom idx
+    distances: torch.Tensor shape (N, 1)
+      Storing connectivity information of atoms
+    connection_atom_idx: torch.Tensor shape (N, 1)
+      One hot encoding representation of the connectivity
     target: torch.Tensor shape (N, 1)
       Target value for prediction
     batch_cif_ids: list
     """
     batch_atom_fea, batch_nbr_fea, batch_nbr_fea_idx, batch_distances = [], [], [], []
     crystal_atom_idx, batch_target = [], []
+    connection_idx, connection_atom_idx = [], []
     base_idx = 0
     for i, ((atom_fea, nbr_fea, nbr_fea_idx, distances), target)\
             in enumerate(dataset_list):
+            
         n_i = atom_fea.shape[0]  # number of atoms for this crystal
         batch_atom_fea.append(atom_fea)
+        
+        #Creating Mask that only considers atoms with distance <= 2
+        connection_idx = np.where(distances <= 2)[0]
+        connection_base = np.zeros((n_i,1))
+        connection_base[connection_idx] = 1
+        connection_atom_idx.append(torch.FloatTensor(connection_base))
+
         batch_distances.append(distances)
         batch_nbr_fea.append(nbr_fea)
         batch_nbr_fea_idx.append(nbr_fea_idx+base_idx)
@@ -71,8 +84,9 @@ def collate_pool(dataset_list):
     return {'atom_fea':torch.cat(batch_atom_fea, dim=0), 
             'nbr_fea':torch.cat(batch_nbr_fea, dim=0), 
             'nbr_fea_idx':torch.cat(batch_nbr_fea_idx, dim=0), 
+            'crystal_atom_idx':crystal_atom_idx,
             'distances':torch.cat(batch_distances,dim=0),
-            'crystal_atom_idx':crystal_atom_idx}, torch.FloatTensor(batch_target)
+            'connection_atom_idx':torch.cat(connection_atom_idx, dim=0)}, torch.FloatTensor(batch_target)
 
 
 class GaussianDistance(object):
@@ -328,6 +342,9 @@ class StructureData():
             if self.use_distance:
                 distances, distances_OHE = distance_to_adsorbate_feature(atoms, VC)
                 atom_fea = np.hstack([atom_fea,distances_OHE])
+                
+            else:
+                distances = [0]*len(atoms)
 
             #Find the strongest neighbors for each atom
             all_nbrs = np.array(all_nbrs)
