@@ -374,6 +374,7 @@ class StructureData():
                                             nbr[:self.max_num_nbr])))
             nbr_fea_idx, nbr_fea = np.array(nbr_fea_idx), np.array(nbr_fea)
             nbr_fea = self.gdf.expand(nbr_fea)
+            distances = [0]*len(atoms)
 
         try:
             nbr_fea = torch.Tensor(nbr_fea)

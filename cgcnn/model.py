@@ -184,7 +184,6 @@ class CrystalGraphConvNet(nn.Module):
         atom_fea_vis = atom_fea*connection_atom_idx
 
         out = self.pooling(atom_fea_vis, crystal_atom_idx, distances)
-        print('connection', connection_atom_idx)
         return out, atom_fea_vis, atom_fea
 
     def pooling(self, atom_fea, crystal_atom_idx, distances):
