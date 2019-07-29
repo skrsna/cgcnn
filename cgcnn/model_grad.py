@@ -86,8 +86,9 @@ class CrystalGraphConvNet(nn.Module):
     """
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=64, n_conv=3, h_fea_len=128, n_h=1,
-                 steps=2, max_num_nbr=12,
-                 classification=False, max_opt_steps=300, min_opt_steps=10, opt_step_size=0.3):
+                 steps=2, max_num_nbr=12,dmax=8, dmin=0, step=0.2,
+                 classification=False, max_opt_steps=300, min_opt_steps=10, opt_step_size=0.3, update_spring=10,
+                variable_bond_constant=True):
         """
         Initialize CrystalGraphConvNet.
 
@@ -144,7 +145,10 @@ class CrystalGraphConvNet(nn.Module):
         self.min_opt_steps=min_opt_steps
         self.max_opt_steps=max_opt_steps
         self.opt_step_size=opt_step_size
-
+        
+        self.gaussian_filter = GaussianDistance(dmin=dmin,step=step,dmax=dmax)
+        self.update_spring = update_spring
+        self.variable_bond_constant = variable_bond_constant
 
     def forward(self, atom_fea, nbr_fea, nbr_fea_idx, nbr_fea_offset, crystal_atom_idx, atom_pos, nbr_pos, atom_pos_idx, cells, fixed_atom_mask, atom_pos_final):
         """
@@ -185,7 +189,7 @@ class CrystalGraphConvNet(nn.Module):
         atom_fea = self.embedding(atom_fea)
         orig_atom_pos = atom_pos.float()
         orig_nbr_fea = nbr_fea.float()
-        orig_atom_fea = atom_fea.float()
+        orig_atom_fea = atom_fea
         
         final_atom_pos = atom_pos_final.float()
         
@@ -196,42 +200,115 @@ class CrystalGraphConvNet(nn.Module):
         grad = torch.FloatTensor([100.0])
         step_count = 0
                                          
-        for conv_func in self.convs:
-            atom_fea = conv_func(atom_fea, nbr_fea, nbr_fea_idx)
+     
+        
 
-        # Creating bond feature
-        atom_features = atom_fea.unsqueeze(1).repeat(1, nbr_fea_idx.shape[1], 1)        
-        nbr_features = atom_fea[nbr_fea_idx]
-        
-        bond_fea = torch.cat((atom_features, nbr_features, nbr_fea), dim=2)
-        
-        #First network to predict the adjustment to the initial distance for the bond springs
-        bond_dist_fea =bond_fea # atom_fea_len --> h_fea_len
-        if hasattr(self, 'dist_fcs') and hasattr(self, 'softpluses'):
-            for fc, softplus,bn in zip(self.dist_fcs, self.dist_softpluses, self.dist_bn):
-                bond_dist_fea = softplus(bn(fc(bond_dist_fea)))
-        
-        #Get the distance from the initial position
-        distance = self.get_distance(atom_pos, nbr_pos, atom_pos_idx, cells, nbr_fea_offset)
-                
-        #Set the bond spring distance to the correction plus the initial position
-        bond_distance = self.bond_distance_softplus(self.fc_to_bond_distance(bond_dist_fea)+distance) #+ distance
+#         distance = self.get_distance(atom_pos, nbr_pos, atom_pos_idx, cells, nbr_fea_offset)
+#         nbr_fea = self.gaussian_filter.expand(distance)
 
-        #Second set of dense networks to predict the spring constant for each spring
-        bond_const_fea = bond_fea # atom_fea_len --> h_fea_len
-        if hasattr(self, 'const_fcs') and hasattr(self, 'softpluses'):
-            for fc, softplus,bn in zip(self.const_fcs, self.const_softpluses, self.const_bn):
-                bond_const_fea = softplus(bn(fc(bond_const_fea)))
-              
-        #The -4 looks arbitrary, but this is here so that the bond constants are initially small. If they are too large the system is unstable and the relaxations fail
-        bond_constant = self.bond_const_softplus(self.fc_to_bond_constant(bond_const_fea)-4) 
+#         bond_fea = torch.cat((atom_features, nbr_features, nbr_fea), dim=2)
+
+#         #First network to predict the adjustment to the initial distance for the bond springs
+#         bond_dist_fea =bond_fea # atom_fea_len --> h_fea_len
+#         if hasattr(self, 'dist_fcs') and hasattr(self, 'softpluses'):
+#             for fc, softplus,bn in zip(self.dist_fcs, self.dist_softpluses, self.dist_bn):
+#                 bond_dist_fea = softplus(bn(fc(bond_dist_fea)))
+
+#         #Set the bond spring distance to the correction plus the initial position
+#         bond_distance = self.bond_distance_softplus(self.fc_to_bond_distance(bond_dist_fea)+distance) #+ distance
+
+#         #Second set of dense networks to predict the spring constant for each spring
+#         bond_const_fea = bond_fea # atom_fea_len --> h_fea_len
+#         if hasattr(self, 'const_fcs') and hasattr(self, 'softpluses'):
+#             for fc, softplus,bn in zip(self.const_fcs, self.const_softpluses, self.const_bn):
+#                 bond_const_fea = softplus(bn(fc(bond_const_fea)))
+
+#         #The -4 looks arbitrary, but this is here so that the bond constants are initially small. If they are too large the system is unstable and the relaxations fail
+#         bond_constant = self.bond_const_softplus(self.fc_to_bond_constant(bond_const_fea)-4) 
+
 
         steepest_descent_step=torch.FloatTensor([1.0])
 
         while (torch.max(torch.abs(steepest_descent_step))>0.001 and step_count<self.max_opt_steps) or step_count<self.min_opt_steps:
-
+            
             distance = self.get_distance(atom_pos, nbr_pos, atom_pos_idx, cells, nbr_fea_offset)
-            bond_energy = torch.abs(bond_constant*(bond_distance-distance)**2.)
+
+
+            #update spring info periodically
+            if step_count==0 or step_count%self.update_spring == 0:
+                
+                nbr_fea = self.gaussian_filter.expand(distance)
+
+                atom_fea = orig_atom_fea
+                for conv_func in self.convs:
+                    atom_fea = conv_func(atom_fea, nbr_fea, nbr_fea_idx)
+
+                # Creating bond feature
+                atom_features = atom_fea.unsqueeze(1).repeat(1, nbr_fea_idx.shape[1], 1)        
+                nbr_features = atom_fea[nbr_fea_idx]
+                
+                bond_fea = torch.cat((atom_features, nbr_features, nbr_fea), dim=2)
+
+                #First network to predict the adjustment to the initial distance for the bond springs
+                bond_dist_fea =bond_fea # atom_fea_len --> h_fea_len
+                if hasattr(self, 'dist_fcs') and hasattr(self, 'softpluses'):
+                    for fc, softplus,bn in zip(self.dist_fcs, self.dist_softpluses, self.dist_bn):
+                        bond_dist_fea = softplus(bn(fc(bond_dist_fea)))
+
+                #Set the bond spring distance to the correction plus the initial position
+                bond_distance = self.bond_distance_softplus(self.fc_to_bond_distance(bond_dist_fea)+distance) #+ distance
+
+                #Second set of dense networks to predict the spring constant for each spring
+                bond_const_fea = bond_fea # atom_fea_len --> h_fea_len
+                if hasattr(self, 'const_fcs') and hasattr(self, 'softpluses'):
+                    for fc, softplus,bn in zip(self.const_fcs, self.const_softpluses, self.const_bn):
+                        bond_const_fea = softplus(bn(fc(bond_const_fea)))
+
+                #The -4 looks arbitrary, but this is here so that the bond constants are initially small. If they are too large the system is unstable and the relaxations fail
+                bond_constant = self.bond_const_softplus(self.fc_to_bond_constant(bond_const_fea)-4)
+
+            if self.variable_bond_constant:
+                bond_energy = torch.abs(bond_constant*(bond_distance-distance)**2.)
+            else:
+                bond_energy = torch.abs(0.1*(bond_distance-distance)**2.)
+
+            
+            #update spring info periodically
+#             if step_count==0 or step_count%self.update_spring == 0:
+# #                 print('update!')
+                
+#                 nbr_fea = self.gaussian_filter.expand(distance)
+
+#                 atom_fea = orig_atom_fea
+#                 for conv_func in self.convs:
+#                     atom_fea = conv_func(atom_fea, nbr_fea, nbr_fea_idx)
+
+#                 # Creating bond feature
+#                 atom_features = atom_fea.unsqueeze(1).repeat(1, nbr_fea_idx.shape[1], 1)        
+#                 nbr_features = atom_fea[nbr_fea_idx]
+                
+#                 bond_fea = torch.cat((atom_features, nbr_features, nbr_fea), dim=2)
+
+#                 #First network to predict the adjustment to the initial distance for the bond springs
+#                 bond_dist_fea =bond_fea # atom_fea_len --> h_fea_len
+#                 if hasattr(self, 'dist_fcs') and hasattr(self, 'softpluses'):
+#                     for fc, softplus,bn in zip(self.dist_fcs, self.dist_softpluses, self.dist_bn):
+#                         bond_dist_fea = softplus(bn(fc(bond_dist_fea)))
+
+#                 #Set the bond spring distance to the correction plus the initial position
+#                 bond_energy = self.fc_to_bond_distance(bond_dist_fea) #+ distance
+
+# #                 #Second set of dense networks to predict the spring constant for each spring
+# #                 bond_const_fea = bond_fea # atom_fea_len --> h_fea_len
+# #                 if hasattr(self, 'const_fcs') and hasattr(self, 'softpluses'):
+# #                     for fc, softplus,bn in zip(self.const_fcs, self.const_softpluses, self.const_bn):
+# #                         bond_const_fea = softplus(bn(fc(bond_const_fea)))
+
+#                 #The -4 looks arbitrary, but this is here so that the bond constants are initially small. If they are too large the system is unstable and the relaxations fail
+#                 #bond_constant = self.bond_const_softplus(self.fc_to_bond_constant(bond_const_fea)-4) 
+
+            
+            #bond_energy = torch.abs(bond_constant*(bond_distance-distance)**2.)
     
             grad_E = bond_energy.sum() #+ ((atom_pos - orig_atom_pos)**2).sum()
             grad = torch.autograd.grad(grad_E, atom_pos, retain_graph=True, create_graph=True)[0]
@@ -246,14 +323,16 @@ class CrystalGraphConvNet(nn.Module):
             nbr_pos = atom_pos[nbr_fea_idx]
             step_count += 1
 
+#         if self.training:
+#             additional_loss = torch.norm(grad, p=2)/10*0
+#         else:
+#             additional_loss = torch.Tensor(0.).cuda()
         return atom_pos[free_atom_idx], grad, atom_pos 
 
     def get_distance(self, atom_pos, nbr_pos, atom_pos_idx, cells, nbr_fea_offset):
         differ = nbr_pos-atom_pos.unsqueeze(1)+ torch.bmm(nbr_fea_offset,cells)
         distance = torch.sqrt(torch.sum(differ**2, dim=2)).unsqueeze(-1) 
         return distance
-
-   
     
     def pooling(self, bond_fea_layer, crystal_atom_idx):
         """
@@ -283,3 +362,50 @@ class CrystalGraphConvNet(nn.Module):
         
         return summed_fea
     
+    
+    
+
+class GaussianDistance(object):
+    """
+    Expands the distance by Gaussian basis.
+
+    Unit: angstrom
+    """
+    def __init__(self, dmin, dmax, step, var=None):
+        """
+        Parameters
+        ----------
+
+        dmin: float
+          Minimum interatomic distance
+        dmax: float
+          Maximum interatomic distance
+        step: float
+          Step size for the Gaussian filter
+        """
+        assert dmin < dmax
+        assert dmax - dmin > step
+        self.filter = torch.FloatTensor(np.arange(dmin, dmax+step, step)).cuda()
+        if var is None:
+            var = step
+        self.var = torch.FloatTensor([var]).cuda()
+
+    def expand(self, distances):
+        """
+        Apply Gaussian disntance filter to a numpy distance 
+        y
+
+        Parameters
+        ----------
+
+        distance: np.array shape n-d array
+          A distance matrix of any shape
+
+        Returns
+        -------
+        expanded_distance: shape (n+1)-d array
+          Expanded distance matrix with the last dimension of length
+          len(self.filter)
+        """
+        return torch.exp(-(distances - self.filter)**2 /
+                      self.var**2)

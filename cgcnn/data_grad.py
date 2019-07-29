@@ -289,7 +289,7 @@ class StructureData():
     nbr_fea: torch.Tensor shape (n_i, M, nbr_fea_len)
     nbr_fea_idx: torch.LongTensor shape (n_i, M)
     """
-    def __init__(self, atoms_list, atoms_list_initial_config, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=False, use_fixed_info=False, use_tag=False, use_distance=False, bond_property=True, train_geometry='initial', is_initial=True):
+    def __init__(self, atoms_list, atoms_list_initial_config, atom_init_loc, max_num_nbr=12, radius=8, dmin=0, step=0.2, random_seed=123, use_voronoi=False, use_fixed_info=False, use_tag=False, use_distance=False, bond_property=True, train_geometry='initial', is_initial=True, rattle=0.01):
         
         #this copy is very important; otherwise things ran, but there was some sort 
         # of shuffle that was affecting the real list, resulting in weird loss
@@ -313,6 +313,7 @@ class StructureData():
         self.train_geometry = train_geometry #could be initial, final, or final-adsorbate?
         self.bond_property = bond_property
         self.is_initial = is_initial
+        self.rattle = rattle
         
     def __len__(self):
         return len(self.atoms_list)
@@ -323,6 +324,8 @@ class StructureData():
         
         if self.is_initial:
             atoms = copy.deepcopy(self.atoms_list_initial_config[idx])
+            if self.rattle>0.:
+                atoms.rattle(self.rattle)
             atoms_final = copy.deepcopy(self.atoms_list[idx])
             
             crystal = AseAtomsAdaptor.get_structure(atoms)
