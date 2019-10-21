@@ -183,7 +183,7 @@ class CrystalGraphConvNet(nn.Module):
         """
         
         """ Dropout should be put here """
-        # dropout  = AlwaysOnDropout(0.3)
+        dropout  = AlwaysOnDropout(0.3)
         
         atom_fea = self.embedding(atom_fea)
         for conv_func in self.convs:
@@ -195,8 +195,8 @@ class CrystalGraphConvNet(nn.Module):
             crys_fea = self.dropout(crys_fea)
         if hasattr(self, 'fcs') and hasattr(self, 'softpluses'):
             for fc, softplus,bn in zip(self.fcs, self.softpluses, self.bn):
-                crys_fea = softplus(bn(fc(crys_fea))) # no dropout
-                # crys_fea = dropout(softplus(bn(fc(crys_fea)))) # with dropout
+                # crys_fea = softplus(bn(fc(crys_fea))) # no dropout
+                crys_fea = dropout(softplus(bn(fc(crys_fea)))) # with dropout
         out = self.fc_out(crys_fea)
         if self.classification:
             out = self.logsoftmax(out)
