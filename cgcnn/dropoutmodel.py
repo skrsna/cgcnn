@@ -4,9 +4,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# from .module import Module # torch.nn.Module
-# from .. import functional as F # torch.nn.functional
+# Specifications that theoretically save time, but does not actually
+#   do that much
+"""
+from .module import Module # torch.nn.Module
+from .. import functional as F # torch.nn.functional 
 from torch._jit_internal import weak_module, weak_script_method
+"""
 
 # New Addition 05/20 - copied from torch.nn.Modules.dropout docs
 class _DropoutNd(nn.Module):
@@ -24,11 +28,13 @@ class _DropoutNd(nn.Module):
         inplace_str = ', inplace' if self.inplace else ''
         return 'p={}{}'.format(self.p, inplace_str)
 
+    
 # @weak_module
 class AlwaysOnDropout(_DropoutNd):
-    @weak_script_method
+    # @weak_script_method
     def forward(self, input):
         return F.dropout(input, self.p, True, self.inplace)
+    
     
 class ConvLayer(nn.Module):
     """
@@ -105,9 +111,9 @@ class CrystalGraphConvNet(nn.Module):
     Create a crystal graph convolutional neural network for predicting total
     material properties.
     """
-    def __init__(self, orig_atom_fea_len, nbr_fea_len,
-                 atom_fea_len=64, n_conv=3, h_fea_len=128, n_h=1,
-                 classification=False):
+    def __init__(self, dropout_bool_, dropout_weight_, orig_atom_fea_len,
+                 nbr_fea_len, atom_fea_len=64, n_conv=3, h_fea_len=128,
+                 n_h=1, classification=False):
         """
         Initialize CrystalGraphConvNet.
 
@@ -127,6 +133,7 @@ class CrystalGraphConvNet(nn.Module):
         n_h: int
           Number of hidden layers after pooling
         """
+        
         super(CrystalGraphConvNet, self).__init__()
         self.classification = classification
         self.embedding = nn.Linear(orig_atom_fea_len, atom_fea_len)
@@ -153,7 +160,10 @@ class CrystalGraphConvNet(nn.Module):
         self.to('cuda',non_blocking=True)
         for module in self.convs:
             module.to('cuda',non_blocking=True)
-
+        
+        self.dropout_bool_ = dropout_bool_
+        self.dropout_weight_ = dropout_weight_
+        
     def forward(self, atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx):
         """
         Forward pass
@@ -179,11 +189,10 @@ class CrystalGraphConvNet(nn.Module):
 
         prediction: nn.Variable shape (N, )
           Atom hidden features after convolution
-
         """
         
-        """ Dropout should be put here """
-        dropout  = AlwaysOnDropout(0.15)
+        """ Dropout is activated here """
+        dropout  = AlwaysOnDropout(self.dropout_weight_)
         
         atom_fea = self.embedding(atom_fea)
         for conv_func in self.convs:
@@ -195,8 +204,10 @@ class CrystalGraphConvNet(nn.Module):
             crys_fea = self.dropout(crys_fea)
         if hasattr(self, 'fcs') and hasattr(self, 'softpluses'):
             for fc, softplus,bn in zip(self.fcs, self.softpluses, self.bn):
-                # crys_fea = softplus(bn(fc(crys_fea))) # no dropout
-                crys_fea = dropout(softplus(bn(fc(crys_fea)))) # with dropout
+                if self.dropout_bool_:
+                    crys_fea = dropout(softplus(bn(fc(crys_fea)))) # with dropout
+                else:
+                    crys_fea = softplus(bn(fc(crys_fea))) # no dropout
         out = self.fc_out(crys_fea)
         if self.classification:
             out = self.logsoftmax(out)

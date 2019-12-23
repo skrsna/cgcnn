@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 # from .module import Module # torch.nn.Module
 # from .. import functional as F # torch.nn.functional
-from torch._jit_internal import weak_module, weak_script_method
+# from torch._jit_internal import weak_module, weak_script_method
 
 # New Addition 05/20 - copied from torch.nn.Modules.dropout docs
 class _DropoutNd(nn.Module):
@@ -26,7 +26,7 @@ class _DropoutNd(nn.Module):
 
 # @weak_module
 class AlwaysOnDropout(_DropoutNd):
-    @weak_script_method
+    # @weak_script_method
     def forward(self, input):
         return F.dropout(input, self.p, True, self.inplace)
     
