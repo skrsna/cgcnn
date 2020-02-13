@@ -1,7 +1,6 @@
 from __future__ import print_function, division
 
 import torch
-
 import torch.nn as nn
 
 
@@ -124,10 +123,10 @@ class CrystalGraphConvNet(nn.Module):
         if self.classification:
             self.logsoftmax = nn.LogSoftmax()
             self.dropout = nn.Dropout()
-            
-        self.to('cuda',non_blocking=True)
+
+        self.to('cuda', non_blocking=True)
         for module in self.convs:
-           module.to('cuda',non_blocking=True)
+            module.to('cuda', non_blocking=True)
 
     def forward(self, atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx):
         """
@@ -159,8 +158,8 @@ class CrystalGraphConvNet(nn.Module):
         atom_fea = self.embedding(atom_fea)
         for conv_func in self.convs:
             atom_fea = conv_func(atom_fea, nbr_fea, nbr_fea_idx)
-        crys_fea = self.pooling(atom_fea, crystal_atom_idx)
-        crys_fea = self.conv_to_fc(self.conv_to_fc_softplus(crys_fea))
+        pooled_fea = self.pooling(atom_fea, crystal_atom_idx)
+        crys_fea = self.conv_to_fc(self.conv_to_fc_softplus(pooled_fea))
         crys_fea = self.conv_to_fc_softplus(crys_fea)
         if self.classification:
             crys_fea = self.dropout(crys_fea)
@@ -171,6 +170,8 @@ class CrystalGraphConvNet(nn.Module):
         if self.classification:
             out = self.logsoftmax(out)
         return out
+        #return out, crys_fea
+        #return out, pooled_fea
 
     def pooling(self, atom_fea, crystal_atom_idx):
         """
