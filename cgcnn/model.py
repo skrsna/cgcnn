@@ -1,7 +1,8 @@
 from __future__ import print_function, division
-
 import torch
-import torch.nn as nn
+from torch import nn
+from torch.nn import functional
+from torch.nn.modules.dropout import Dropout
 
 
 class ConvLayer(nn.Module):
@@ -81,7 +82,7 @@ class CrystalGraphConvNet(nn.Module):
     """
     def __init__(self, orig_atom_fea_len, nbr_fea_len,
                  atom_fea_len=64, n_conv=3, h_fea_len=128, n_h=1,
-                 classification=False):
+                 dropout=None, classification=False):
         """
         Initialize CrystalGraphConvNet.
 
@@ -100,6 +101,9 @@ class CrystalGraphConvNet(nn.Module):
           Number of hidden features after pooling
         n_h: int
           Number of hidden layers after pooling
+        dropout: float
+          The fraction of nodes to drop out within the dense layers. If `None`,
+          then does not use dropout at all.
         """
         super(CrystalGraphConvNet, self).__init__()
         self.classification = classification
@@ -127,6 +131,8 @@ class CrystalGraphConvNet(nn.Module):
         self.to('cuda', non_blocking=True)
         for module in self.convs:
             module.to('cuda', non_blocking=True)
+
+        self.dropout = dropout
 
     def forward(self, atom_fea, nbr_fea, nbr_fea_idx, crystal_atom_idx):
         """
@@ -165,7 +171,11 @@ class CrystalGraphConvNet(nn.Module):
             crys_fea = self.dropout(crys_fea)
         if hasattr(self, 'fcs') and hasattr(self, 'softpluses'):
             for fc, softplus in zip(self.fcs, self.softpluses):
-                crys_fea = softplus(fc(crys_fea))
+                if self.dropout:
+                    dropout = AlwaysOnDropout(self.dropout)
+                    crys_fea = dropout(softplus(fc(crys_fea)))
+                else:
+                    crys_fea = softplus(fc(crys_fea))
         out = self.fc_out(crys_fea)
         if self.classification:
             out = self.logsoftmax(out)
@@ -193,3 +203,12 @@ class CrystalGraphConvNet(nn.Module):
         summed_fea = [torch.mean(atom_fea[idx_map], dim=0, keepdim=True)
                       for idx_map in crystal_atom_idx]
         return torch.cat(summed_fea, dim=0)
+
+
+class AlwaysOnDropout(Dropout):
+    '''
+    Modified form od the `torch.nn.modules.dropout.Dropout class that always
+    has dropout on.
+    '''
+    def forward(self, input):
+        return functional.dropout(input, self.p, True, self.inplace)
